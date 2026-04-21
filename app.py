@@ -1,82 +1,6 @@
-import streamlit as st
-import yfinance as yf
-import pandas as pd
-import plotly.graph_objects as go
-import numpy as np
-
-# 1. 페이지 설정
-st.set_page_config(page_title="주간 수익률 분석 (금요일 2시 기준)", layout="wide")
-
-# 2. 국내 종목 설정
-tickers_info = {
-    '005930.KS': {'name': '삼성전자', 'color': '#0057D8', 'width': 6},
-    '132030.KS': {'name': 'KODEX 원유선물(H)', 'color': '#E67E22', 'width': 2},
-    '261240.KS': {'name': 'KODEX 미국달러선물(x5)', 'color': '#34495E', 'width': 2},
-    '144600.KS': {'name': 'KODEX 은선물(H)(x2)', 'color': '#BDC3C7', 'width': 2} # 은 2배 설정
-}
-
-@st.cache_data(ttl=30)
-def get_weekly_performance_data():
-    combined_df_list = []
-    current_stats = {}
-    
-    for sym, info in tickers_info.items():
-        try:
-            # 데이터 로드 (15분봉)
-            df = yf.download(sym, period='1mo', interval='15m', progress=False)
-            if df.empty: continue
-            
-            # Close 데이터 추출
-            if isinstance(df.columns, pd.MultiIndex):
-                close = df['Close'][sym].copy()
-            else:
-                close = df['Close'].copy()
-            
-            # 시간대 KST 변환
-            if close.index.tz is None:
-                close.index = close.index.tz_localize('UTC').tz_convert('Asia/Seoul')
-            else:
-                close.index = close.index.tz_convert('Asia/Seoul')
-
-            # --- [로직] 전주 금요일 14:00 기준가 산출 ---
-            year_week = close.index.strftime('%Y-%U')
-            
-            def get_friday_2pm_base(group):
-                week_start = group.index[0]
-                prior_data = close[close.index < week_start]
-                # 금요일 14:00 데이터 탐색
-                friday_points = prior_data[(prior_data.index.weekday == 4) & (prior_data.index.hour == 14)]
-                
-                if not friday_points.empty:
-                    return friday_points.iloc[-1]
-                return group.dropna().iloc[0]
-
-            base_prices = close.groupby(year_week).apply(get_friday_2pm_base, include_groups=False)
-            
-            # 수익률 계산
-            ret = close.copy()
-            for wk in year_week.unique():
-                mask = (year_week == wk)
-                b_val = base_prices[wk]
-                ret[mask] = ((close[mask] - b_val) / b_val * 100)
-            
-            # 가중치 적용
-            if sym == '261240.KS': ret *= 5   # 달러 x5
-            if sym == '144600.KS': ret *= 2   # 은 x2 (요청사항)
-            
-            current_stats[sym] = {'price': close.dropna().iloc[-1], 'ret': ret.dropna().iloc[-1]}
-            ret.name = sym
-            combined_df_list.append(ret)
-        except: continue
-    
-    if not combined_df_list: return None, None
-        
-    final_df = pd.concat(combined_df_list, axis=1).ffill()
-    return final_df, current_stats
-
 def run_app():
     st.title("📈 주간 수익률 분석 (기준: 전주 금요일 14:00)")
-    st.markdown("##### 🟦 삼성전자 강조 | 🟥 빨간선: 월요일 09:00 개장 시점 | 🥈 은(Silver) 수익률 2배 적용")
+    st.markdown("##### 🟦 삼성전자 강조 | 🟥 빨간 실선: 월요일 09:00 개장 시점 | 🥈 은(Silver) 수익률 2배")
 
     df, stats = get_weekly_performance_data()
     if df is None:
@@ -100,10 +24,24 @@ def run_app():
                 hovertemplate=f"<b>{info['name']}</b><br>수익률: %{{y:.2f}}%<extra></extra>"
             ))
 
-    # --- [수정] 월요일 09:00 붉은색 세로줄 추가 ---
-    monday_starts = df.index[(df.index.weekday == 0) & (df.index.hour == 9) & (df.index.minute == 0)]
-    for m_start in monday_starts:
-        fig.add_vline(x=m_start, line_width=2, line_color="red", line_dash="solid")
+    # --- [수정된 붉은색 세로줄 로직] ---
+    # 정확히 09:00이 아니더라도 9시 정각 데이터를 포함하는 날짜를 찾아 세로줄을 긋습니다.
+    # 월요일(weekday 0)이면서 시(hour)가 9인 데이터의 날짜들을 추출
+    monday_open_times = df.index[(df.index.weekday == 0) & (df.index.hour == 9)]
+    
+    # 중복 날짜를 제거하고 각 월요일 아침마다 줄 생성
+    unique_mondays = pd.Series(monday_open_times).dt.normalize().unique()
+    
+    for m_day in unique_mondays:
+        # 해당 날짜의 오전 9시 정각 시점을 타겟팅
+        target_time = pd.Timestamp(m_day).replace(hour=9, minute=0)
+        fig.add_vline(
+            x=target_time, 
+            line_width=3,          # 더 두껍게
+            line_color="red",      # 붉은색
+            line_dash="solid",     # 실선으로 변경하여 더 잘 보이게 함
+            opacity=0.8            # 약간의 투명도
+        )
 
     fig.update_layout(
         hovermode="x unified", height=800, template="plotly_white",
@@ -114,12 +52,15 @@ def run_app():
                 dict(bounds=[15.5, 9], pattern="hour"),
             ]
         ),
-        yaxis=dict(title="수익률 (%)", range=[-15, 15], ticksuffix="%", zeroline=True, zerolinewidth=3, zerolinecolor='black'),
+        yaxis=dict(
+            title="상승률 (%)", 
+            range=[-15, 15], 
+            ticksuffix="%", 
+            zeroline=True, 
+            zerolinewidth=2, 
+            zerolinecolor='black'
+        ),
         legend=dict(orientation="h", y=1.05, x=0.5, xanchor="center")
     )
 
     st.plotly_chart(fig, use_container_width=True)
-    st.info(f"💡 기준점: 전주 금요일 14:00 가격 = 0% | 업데이트: {df.index[-1].strftime('%H:%M:%S')}")
-
-if __name__ == "__main__":
-    run_app()
