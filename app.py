@@ -5,124 +5,130 @@ import plotly.graph_objects as go
 import numpy as np
 
 # 1. 페이지 설정
-st.set_page_config(page_title="주간 수익률 정밀 분석기", layout="wide")
+st.set_page_config(page_title="주간 상승률 분석기", layout="wide")
 
-# 2. 설정 데이터
-TICKERS_INFO = {
+# 2. 종목 및 기본 설정
+tickers_info = {
     '005930.KS': {'name': '삼성전자', 'color': '#0057D8', 'width': 6},
     'CL=F': {'name': 'WTI 원유', 'color': '#E67E22', 'width': 2},
     'DX-Y.NYB': {'name': '달러지수(x5)', 'color': '#34495E', 'width': 2},
     'SI=F': {'name': '글로벌 은', 'color': '#BDC3C7', 'width': 2}
 }
 
-@st.cache_data(ttl=60)
-def get_final_data():
-    combined_list = []
+@st.cache_data(ttl=30)
+def get_weekly_performance_data():
+    combined_df_list = []
     current_stats = {}
     
-    for sym, info in TICKERS_INFO.items():
+    for sym, info in tickers_info.items():
         try:
-            # 데이터 로드 (최신 yfinance 인덱스 대응)
-            raw = yf.download(sym, period='1mo', interval='15m', progress=False)
-            if raw.empty: continue
+            # 1개월치 15분봉 데이터 로드
+            df = yf.download(sym, period='1mo', interval='15m', progress=False)
+            if df.empty: continue
             
-            # Close 데이터 추출 로직 보강
-            if isinstance(raw.columns, pd.MultiIndex):
-                if 'Close' in raw.columns.levels[0]:
-                    df_close = raw['Close'].iloc[:, 0]
-                else:
-                    df_close = raw.xs('Close', axis=1, level=0).iloc[:, 0]
+            # 멀티인덱스 대응 및 Close 데이터 추출
+            if isinstance(df.columns, pd.MultiIndex):
+                close = df['Close'][sym].copy()
             else:
-                df_close = raw['Close']
-
-            # KST 변환
-            if df_close.index.tz is None:
-                df_close.index = df_close.index.tz_localize('UTC').tz_convert('Asia/Seoul')
+                close = df['Close'].copy()
+            
+            # 시간대 KST 변환
+            if close.index.tz is None:
+                close.index = close.index.tz_localize('UTC').tz_convert('Asia/Seoul')
             else:
-                df_close.index = df_close.index.tz_convert('Asia/Seoul')
-            
-            df_close = df_close.dropna()
+                close.index = close.index.tz_convert('Asia/Seoul')
 
-            # --- 금요일 14:00 기준 수익률 계산 ---
-            year_week = df_close.index.strftime('%Y-%U')
+            # --- [핵심] 월요일 아침 첫 가격 기준 수익률 계산 ---
+            year_week = close.index.strftime('%Y-%U')
             
-            def find_friday_base(group):
-                week_start = group.index[0]
-                prior_data = df_close[df_close.index < week_start]
-                target = prior_data[(prior_data.index.weekday == 4) & (prior_data.index.hour == 14)]
-                return target.iloc[-1] if not target.empty else group.iloc[0]
+            def get_first_valid(series):
+                valid = series.dropna()
+                return valid.iloc[0] if not valid.empty else np.nan
 
-            base_map = df_close.groupby(year_week).apply(find_friday_base, include_groups=False)
+            monday_open_price = close.groupby(year_week).transform(get_first_valid)
             
-            rets = []
-            for wk in year_week.unique():
-                wk_data = df_close[year_week == wk]
-                base_val = base_map[wk]
-                rets.append((wk_data - base_val) / base_val * 100)
+            # 월요일 아침 대비 상승률 (%)
+            ret = ((close - monday_open_price) / monday_open_price * 100)
             
-            final_ret = pd.concat(rets)
-            if sym == 'DX-Y.NYB': final_ret *= 5
-                
-            final_ret.name = sym
-            combined_list.append(final_ret)
-            current_stats[sym] = {'price': df_close.iloc[-1], 'ret': final_ret.iloc[-1]}
+            # 달러지수 가중치 (x5)
+            if sym == 'DX-Y.NYB': ret *= 5
             
-        except Exception as e:
-            continue
+            # 실시간 수치 저장용
+            latest_val = close.dropna().iloc[-1]
+            latest_ret = ret.dropna().iloc[-1]
+            current_stats[sym] = {'price': latest_val, 'ret': latest_ret}
 
-    if not combined_list: return None, None
+            ret.name = sym
+            combined_df_list.append(ret)
+        except: continue
     
-    # 데이터 통합
-    full_df = pd.concat(combined_list, axis=1)
+    if not combined_df_list:
+        return None, None
+        
+    # --- [해결 포인트] 데이터 통합 및 빈 구간 채우기 ---
+    # 모든 종목을 하나의 시계열로 합친 후, 데이터가 없는 시간대를 직전 데이터로 채워 선을 잇습니다.
+    final_df = pd.concat(combined_df_list, axis=1)
+    final_df = final_df.ffill() # 삼성전자 개장 전 새벽 시간을 직전 주의 종가 데이터로 연결
     
-    # [수정 포인트] 최신 Pandas 방식의 ffill 사용 (에러 해결)
-    full_df = full_df.ffill()
-    
-    return full_df, current_stats
+    return final_df, current_stats
 
-def main():
-    st.title("📊 삼성전자 및 주요 지수 수익률 비교")
-    st.markdown("##### 💡 기준: **전주 금요일 14:00 (0%)**")
+def run_app():
+    st.title("📊 월요일 아침 대비 주간 상승률 (%)")
+    st.markdown("##### 🟦 삼성전자 강조 | ⬛ 월요일 0% 시작 | ✂️ 밤 시간/주말 삭제")
 
-    df_ret, stats = get_final_data()
-
-    if df_ret is None:
-        st.error("데이터를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+    df, stats = get_weekly_performance_data()
+    if df is None:
+        st.error("데이터 로딩 실패")
         return
 
     fig = go.Figure()
-    render_order = ['CL=F', 'DX-Y.NYB', 'SI=F', '005930.KS']
 
-    for sym in render_order:
-        if sym in df_ret.columns:
-            info = TICKERS_INFO[sym]
-            s_info = stats[sym]
+    # 종목 그리기 (삼성전자를 가장 마지막에 추가하여 레이어 최상단 배치)
+    plot_order = ['CL=F', 'DX-Y.NYB', 'SI=F', '005930.KS']
+    
+    for sym in plot_order:
+        if sym in df.columns:
+            info = tickers_info[sym]
+            curr = stats.get(sym, {'price': 0, 'ret': 0})
+            
+            # 이름 옆에 [현재가격 | 월요일 대비 상승률] 표시
+            display_name = f"{info['name']} [{curr['price']:,.0f} | {curr['ret']:+.2f}%]"
             
             fig.add_trace(go.Scatter(
-                x=df_ret.index,
-                y=df_ret[sym],
-                name=f"{info['name']} ({s_info['price']:,.0f} | {s_info['ret']:+.2f}%)",
+                x=df.index, y=df[sym],
+                name=display_name,
                 line=dict(color=info['color'], width=info['width']),
-                connectgaps=True
+                connectgaps=True, # 빈 구간 직선 연결 강제
+                hovertemplate=f"<b>{info['name']}</b><br>월요일대비: %{{y:.2f}}%<extra></extra>"
             ))
 
-    # 그래프 레이아웃
+    # 기준선 (월요일 오전 9시 개장 시점 수직선)
+    monday_starts = df.index[(df.index.weekday == 0) & (df.index.hour == 9) & (df.index.minute == 0)]
+    for m_start in monday_starts:
+        fig.add_vline(x=m_start, line_width=2, line_color="black")
+
     fig.update_layout(
-        height=750,
         hovermode="x unified",
+        height=800,
         template="plotly_white",
-        legend=dict(orientation="h", y=1.05, x=0.5, xanchor="center"),
         xaxis=dict(
-            tickformat="%m/%d\n%H:%M",
+            tickformat="%m/%d %H:%M",
             rangebreaks=[
-                dict(bounds=["sat", "mon"]),
-                dict(bounds=[15.5, 9], pattern="hour"),
+                dict(bounds=["sat", "mon"]),           # 주말 삭제
+                dict(bounds=[15.5, 9], pattern="hour"), # 밤 시간(15:30~09:00) 삭제
             ]
         ),
-        yaxis=dict(title="수익률 (%)", zeroline=True, zerolinewidth=2, range=[-15, 15])
+        yaxis=dict(
+            title="상승률 (기준: 월요일 시가 = 0%)",
+            range=[-20, 20],   # Y축 ±20% 고정
+            ticksuffix="%",
+            zeroline=True, zerolinewidth=3, zerolinecolor='black' # 0% 라인 강조
+        ),
+        legend=dict(orientation="h", y=1.05, x=0.5, xanchor="center", font=dict(size=13))
     )
 
     st.plotly_chart(fig, use_container_width=True)
+    st.info(f"💡 모든 지표는 해당 주의 월요일 첫 거래 가격을 0%로 잡고 계산되었습니다. (최종 업데이트: {df.index[-1].strftime('%H:%M:%S')})")
 
 if __name__ == "__main__":
-    main()
+    run_app()
