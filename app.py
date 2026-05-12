@@ -4,106 +4,99 @@ import pandas as pd
 import plotly.graph_objects as go
 
 # 1. 페이지 설정
-st.set_page_config(page_title="수익률 정밀 분석 (은 지표 추가)", layout="wide")
+st.set_page_config(page_title="종합 자산 분석기 (금/구리 비율)", layout="wide")
 
-# 2. 종목 설정
+# 2. 종목 설정 (국내 ETF 기준)
 tickers_info = {
     '005930.KS': {'name': '삼성전자', 'color': '#0057D8', 'width': 5},
     '132030.KS': {'name': '원유선물', 'color': '#E67E22', 'width': 2},
-    '261240.KS': {'name': '달러선물', 'color': '#34495E', 'width': 2},
-    '144600.KS': {'name': '은선물', 'color': '#BDC3C7', 'width': 2}, # 다시 표시
-    '138920.KS': {'name': '금선물', 'color': '#F1C40F', 'width': 0}  # 비율 계산용
+    '261240.KS': {'name': '달러선물(x5)', 'color': '#34495E', 'width': 2},
+    '144600.KS': {'name': '은선물', 'color': '#7F8C8D', 'width': 2},
+    '138920.KS': {'name': '금선물', 'color': '#F1C40F', 'width': 2}, # 금 다시 추가
+    '138910.KS': {'name': '구리선물', 'color': '#C36428', 'width': 2} # 구리 추가
 }
 
 @st.cache_data(ttl=30)
-def get_clean_data():
+def get_processed_data():
     raw_data = {}
     for sym in tickers_info.keys():
         try:
             df = yf.download(sym, period='1mo', interval='15m', progress=False)
             if df.empty: continue
-            col = 'Close'
-            series = df[col][sym] if isinstance(df.columns, pd.MultiIndex) else df[col]
-            series.index = series.index.tz_convert('Asia/Seoul') if series.index.tz else series.index.tz_localize('UTC').tz_convert('Asia/Seoul')
+            series = df['Close'][sym] if isinstance(df.columns, pd.MultiIndex) else df['Close']
+            if series.index.tz is None:
+                series.index = series.index.tz_localize('UTC').tz_convert('Asia/Seoul')
+            else:
+                series.index = series.index.tz_convert('Asia/Seoul')
             raw_data[sym] = series.ffill()
         except: continue
 
-    # 은/금 비율 생성
-    if '144600.KS' in raw_data and '138920.KS' in raw_data:
-        raw_data['RATIO'] = (raw_data['144600.KS'] / raw_data['138920.KS']).ffill()
+    # 금/구리 비율 생성 (Gold / Copper)
+    if '138920.KS' in raw_data and '138910.KS' in raw_data:
+        raw_data['GC_RATIO'] = (raw_data['138920.KS'] / raw_data['138910.KS']).ffill()
 
-    processed_df_list = []
+    processed_list = []
     stats = {}
-
-    # 계산 및 표시 대상 (은선물 추가)
     targets = {
-        '005930.KS': '삼성전자', 
-        '132030.KS': '원유선물', 
-        '261240.KS': '달러선물', 
-        '144600.KS': '은선물',
-        'RATIO': '은/금 비율'
+        '005930.KS': '삼성전자', '132030.KS': '원유선물', 
+        '261240.KS': '달러선물', '144600.KS': '은선물',
+        '138920.KS': '금선물', '138910.KS': '구리선물', 
+        'GC_RATIO': '금/구리 비율'
     }
 
     for sym, name in targets.items():
         if sym not in raw_data: continue
-        
         series = raw_data[sym]
         year_week = series.index.strftime('%Y-%U')
         weekly_returns = []
-        
+
         for wk in year_week.unique():
             wk_data = series[year_week == wk]
-            if wk_data.empty: continue
-            
-            prior_data = series[series.index < wk_data.index[0]]
-            base_point = prior_data[(prior_data.index.weekday == 4) & (prior_data.index.hour == 14)]
+            prior = series[series.index < wk_data.index[0]]
+            # 기준점: 전주 금요일 14:00
+            base_point = prior[(prior.index.weekday == 4) & (prior.index.hour == 14)]
             base_val = base_point.iloc[-1] if not base_point.empty else wk_data.iloc[0]
             
             ret = (wk_data / base_val - 1) * 100
-            
-            # 배수 적용 로직
             if sym == '261240.KS': ret *= 5   # 달러 x5
-            if sym == 'RATIO': ret *= 2       # 은/금비율 x2
-            # '144600.KS'(은선물)은 1배수로 표시 (필요시 수정 가능)
-            
+            if sym == 'GC_RATIO': ret *= 2    # 비율 변동 강조 (x2)
             weekly_returns.append(ret)
         
-        final_series = pd.concat(weekly_returns)
-        final_series.name = sym
-        processed_df_list.append(final_series)
-        
-        stats[sym] = {
-            'price': series.iloc[-1],
-            'pct': final_series.iloc[-1]
-        }
+        final_ret = pd.concat(weekly_returns)
+        final_ret.name = sym
+        processed_list.append(final_ret)
+        stats[sym] = {'price': series.iloc[-1], 'pct': final_ret.iloc[-1]}
 
-    return pd.concat(processed_df_list, axis=1).ffill(), stats
+    return pd.concat(processed_list, axis=1).ffill(), stats
 
 def run_app():
-    st.title("📊 주간 수익률 변동 분석")
-    st.markdown("##### 🟦 삼성전자 | 🥈 은선물(1배) & (은/금)비율(2배) | 🟥 금요일 마감선")
-    
-    df, stats = get_clean_data()
+    st.title("📊 자산 종합 분석 (금/구리 비율 지표)")
+    st.markdown("##### 🟦 삼성전자 | 🟠 구리 | 🟡 금 | 📉 금/구리 비율(x2) | 🟥 금요일 마감")
+
+    df, stats = get_processed_data()
     if df is None: return
 
     fig = go.Figure()
-
+    # 스타일 정의
     style = {
         '005930.KS': ('#0057D8', 6, '삼성전자'),
-        '132030.KS': ('#E67E22', 2, '원유선물'),
-        '261240.KS': ('#34495E', 2, '달러선물(x5)'),
-        '144600.KS': ('#7F8C8D', 2, '은선물'),        # 진한 회색
-        'RATIO': ('#8E44AD', 3, '(은/금)비율(x2)')   # 보라색
+        '132030.KS': ('#E67E22', 2, '원유'),
+        '261240.KS': ('#34495E', 1, '달러(x5)'),
+        '144600.KS': ('#7F8C8D', 1, '은'),
+        '138920.KS': ('#F1C40F', 2, '금'),
+        '138910.KS': ('#C36428', 2, '구리'),
+        'GC_RATIO': ('#1ABC9C', 4, '(금/구리)비율(x2)') # 청록색 강조
     }
 
-    for sym, (color, width, name) in style.items():
+    for sym in style.keys():
         if sym in df.columns:
+            color, width, name = style[sym]
             s = stats[sym]
-            p_label = f"{s['price']:.4f}" if sym == 'RATIO' else f"{s['price']:,.0f}"
+            p_val = f"{s['price']:.4f}" if sym == 'GC_RATIO' else f"{s['price']:,.0f}"
             
             fig.add_trace(go.Scatter(
                 x=df.index, y=df[sym],
-                name=f"{name} [{p_label} | {s['pct']:+.2f}%]",
+                name=f"{name} [{p_val} | {s['pct']:+.2f}%]",
                 line=dict(color=color, width=width),
                 connectgaps=True
             ))
