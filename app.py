@@ -10,7 +10,7 @@ st.set_page_config(page_title="24H 글로벌 자산 분석기", layout="wide")
 # 2. 종목 설정 (SOX는 야후 파이낸스 공식 심볼 ^SOX 사용)
 tickers_info = {
     'HG=F': {'name': '국제 구리', 'color': '#D35400', 'width': 2},
-    '^SOX': {'name': '필라델피아 반도체', 'color': '#0057D8', 'width': 4},
+   
     'SI=F': {'name': '글로벌 은', 'color': '#95A5A6', 'width': 2},
     'CL=F': {'name': 'WTI 원유', 'color': '#27AE60', 'width': 1.5},
     'DX-Y.NYB': {'name': '달러지수(x5)', 'color': '#34495E', 'width': 1.5}
