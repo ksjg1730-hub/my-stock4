@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 # 1. 페이지 설정
 st.set_page_config(page_title="24H 매크로 주도주 위기 감지 시스템", layout="wide")
 
-# 2. 종목 설정 (기본 색상)
+# 2. 종목 설정
 tickers_info = {
     'HG=F': {'name': '국제 구리', 'color': '#D35400', 'width': 1.5},
     'SI=F': {'name': '글로벌 은', 'color': '#F1C40F', 'width': 2.5}, # 노랑
@@ -72,60 +72,54 @@ def get_performance_data():
     raw_energy = pos_ret_df.apply(get_bull_energy, axis=1)
     raw_energy = raw_energy.ffill().fillna(0)
     
-    # 이평선 계산 (10MA 삭제)
-    final_df['MA30'] = raw_energy.rolling(window=30, min_periods=1).mean()
-    final_df['MA60'] = raw_energy.rolling(window=60, min_periods=1).mean()
+    # [수정] 이평선 주기 변경: 20, 50
+    final_df['MA20'] = raw_energy.rolling(window=20, min_periods=1).mean()
+    final_df['MA50'] = raw_energy.rolling(window=50, min_periods=1).mean()
     
     return final_df, current_stats
 
 def run_app():
-    st.title("🚨 매크로 주도주 & 에너지 음전 동기화 분석")
-    st.markdown("##### 💡 **MA 음전(초록) 시 1등 종목 분홍색 전환** | 10MA 제거 완료 | 은: 노랑")
+    st.title("🚨 매크로 주도주 & 20-50 에너지 동기화")
+    st.markdown("##### 💡 **에너지 음전 시 1등 종목 초록색 전환** | 이평선 주기: 20, 50 | 은: 노랑")
 
     df, stats = get_performance_data()
     if df is None:
         st.info("데이터를 불러오는 중입니다...")
         return
 
-    # 1등 종목 찾기 (현재 수익률 기준)
+    # 주중 1등 종목 선정 (현재 수익률 기준)
     top_ticker = max(stats, key=lambda k: stats[k]['ret'])
     
     fig = go.Figure()
 
-    # 에너지 음전 상태 계산 (MA30 또는 MA60 둘 중 하나라도 하락 중이면 위기로 간주)
-    ma30_diff = df['MA30'].diff().fillna(0)
-    ma60_diff = df['MA60'].diff().fillna(0)
-    is_crisis = (ma30_diff < 0) | (ma60_diff < 0)
+    # 에너지 음전 상태 판단 (MA20 또는 MA50 하락 시)
+    ma20_diff = df['MA20'].diff().fillna(0)
+    ma50_diff = df['MA50'].diff().fillna(0)
+    is_crisis = (ma20_diff < 0) | (ma50_diff < 0)
 
-    # 1. 개별 자산 수익률 (1등 종목 가변 색상 로직 적용)
+    # 1. 자산 수익률 (1등 종목 가변 색상: 음전 시 초록)
     for sym, info in tickers_info.items():
         if sym in df.columns:
-            line_color = info['color']
-            line_width = info['width']
-            
-            # 1등 종목인데 위기(음전) 상황이면 분홍색으로 변경
             if sym == top_ticker:
-                line_width = 4  # 주도주 강조
-                
-                # 시계열 색상 변화를 위해 구간별로 그림
+                # 1등 종목 분리 렌더링 (정상 vs 음전)
                 df_top_normal = df[sym].copy()
                 df_top_normal[is_crisis] = np.nan
                 
                 df_top_crisis = df[sym].copy()
                 df_top_crisis[~is_crisis] = np.nan
                 
-                # 정상 구간 (기본색)
+                # 정상 상승 (기본색)
                 fig.add_trace(go.Scatter(
                     x=df.index, y=df_top_normal,
-                    name=f"⭐ {info['name']} (주도주)",
-                    line=dict(color=info['color'], width=line_width),
+                    name=f"⭐ {info['name']} (상승주도)",
+                    line=dict(color=info['color'], width=4),
                     connectgaps=False
                 ))
-                # 위기 구간 (분홍색)
+                # 에너지 음전 (초록색 전환)
                 fig.add_trace(go.Scatter(
                     x=df.index, y=df_top_crisis,
-                    name=f"⚠️ {info['name']} (위기-분홍)",
-                    line=dict(color='#FF69B4', width=line_width + 1),
+                    name=f"⚠️ {info['name']} (탄력둔화)",
+                    line=dict(color='#2ECC71', width=5), # 선명한 초록
                     connectgaps=False
                 ))
             else:
@@ -133,40 +127,39 @@ def run_app():
                 fig.add_trace(go.Scatter(
                     x=df.index, y=df[sym],
                     name=f"{info['name']} ({stats[sym]['ret']:+.2f}%)",
-                    line=dict(color=line_color, width=line_width),
-                    opacity=0.6,
+                    line=dict(color=info['color'], width=info['width']),
+                    opacity=0.5,
                     connectgaps=True 
                 ))
 
-    # 2. 가변형 이평선 (음전 시 초록)
+    # 2. 가변형 이평선 (20-50 주기)
     def add_adaptive_ma(ma_col, name, width, dash=None):
         diff = df[ma_col].diff().fillna(0)
         
-        # 기본 검은색 선
+        # 기본 검은색 배경선
         fig.add_trace(go.Scatter(
             x=df.index, y=df[ma_col], name=name,
             line=dict(color='black', width=width, dash=dash),
-            opacity=0.3,
+            opacity=0.2,
             showlegend=True
         ))
         
-        # 하락(음전) 구간 초록색 강조
+        # 하락 구간 초록색 강조
         df_down = df[ma_col].copy()
         df_down[diff >= 0] = np.nan
         
         fig.add_trace(go.Scatter(
             x=df_down.index, y=df_down,
-            name=f"{name} (하락감지)",
+            name=f"{name} (하락)",
             line=dict(color='#27AE60', width=width + 1, dash=dash),
             showlegend=False,
             connectgaps=False
         ))
 
-    if 'MA30' in df.columns:
-        add_adaptive_ma('MA30', '상승에너지 MA 30', 3)
-        add_adaptive_ma('MA60', '상승에너지 MA 60', 4, 'dot')
+    if 'MA20' in df.columns:
+        add_adaptive_ma('MA20', '상승에너지 MA 20', 3)
+        add_adaptive_ma('MA50', '상승에너지 MA 50', 4, 'dot')
 
-    # 레이아웃 설정
     fig.update_layout(
         hovermode="x unified", height=800, template="plotly_white",
         xaxis=dict(tickformat="%m/%d %H:%M", rangebreaks=[dict(bounds=["sat", "mon"])]),
@@ -176,18 +169,16 @@ def run_app():
 
     st.plotly_chart(fig, use_container_width=True)
     
-    # 하단 메트릭
+    # 하단 데이터 바
     cols = st.columns(len(tickers_info) + 2)
     for i, sym in enumerate(tickers_info.keys()):
         if sym in stats:
             label = f"⭐ {tickers_info[sym]['name']}" if sym == top_ticker else tickers_info[sym]['name']
             cols[i].metric(label, f"{stats[sym]['price']:,.2f}", f"{stats[sym]['ret']:.2f}%")
     
-    if 'MA30' in df.columns:
-        cols[-2].metric("BULL MA 30", f"{df['MA30'].iloc[-1]:.2f}%", 
-                        delta=round(df['MA30'].diff().iloc[-1], 2), delta_color="inverse")
-        cols[-1].metric("BULL MA 60", f"{df['MA60'].iloc[-1]:.2f}%", 
-                        delta=round(df['MA60'].diff().iloc[-1], 2), delta_color="inverse")
+    if 'MA20' in df.columns:
+        cols[-2].metric("BULL MA 20", f"{df['MA20'].iloc[-1]:.2f}%", delta=round(df['MA20'].diff().iloc[-1], 2), delta_color="inverse")
+        cols[-1].metric("BULL MA 50", f"{df['MA50'].iloc[-1]:.2f}%", delta=round(df['MA50'].diff().iloc[-1], 2), delta_color="inverse")
 
 if __name__ == "__main__":
     run_app()
