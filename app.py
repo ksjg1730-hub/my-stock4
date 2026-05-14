@@ -1,11 +1,11 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import numpy as np  # np.nan 사용을 위해 추가
+import numpy as np
 import plotly.graph_objects as go
 
 # 1. 페이지 설정
-st.set_page_config(page_title="24H 매크로 변동성 분석기", layout="wide")
+st.set_page_config(page_title="24H 매크로 추세 분석기", layout="wide")
 
 # 2. 종목 설정
 tickers_info = {
@@ -30,7 +30,7 @@ def get_performance_data():
             else:
                 close = df['Close']
 
-            # [수정] pd.NA 대신 np.nan을 사용하여 DataError 방지
+            # 0 또는 결측치 보정
             close = close.replace(0, np.nan).dropna()
             
             if close.index.tz is None:
@@ -56,24 +56,22 @@ def get_performance_data():
     if not combined_df: return None, {}
     final_df = pd.concat(combined_df, axis=1)
     
-    # --- [에너지 로직 수정] ---
+    # --- [에너지 합계 기반 이평선 계산] ---
     vol_targets = list(tickers_info.keys())
     available_targets = [t for t in vol_targets if t in final_df.columns]
     
-    # 절대값 데이터프레임 생성
-    abs_df = final_df[available_targets].abs()
+    # 기초 에너지 값 (절대값 합산 * 0.5)
+    raw_energy = final_df[available_targets].abs().sum(axis=1, min_count=1) * 0.5
     
-    # [수정] 모든 값이 결측치인 행은 0으로 합산되지 않게 처리 (min_count=1)
-    final_df['Energy_Raw'] = abs_df.sum(axis=1, min_count=1) * 0.5
-    
-    # 장기 이동평균선 (30주기)
-    final_df['Energy_MA30'] = final_df['Energy_Raw'].rolling(window=30, min_periods=1).mean()
+    # 단기(10) 및 장기(30) 이평선 생성
+    final_df['MA10'] = raw_energy.rolling(window=10, min_periods=1).mean()
+    final_df['MA30'] = raw_energy.rolling(window=30, min_periods=1).mean()
     
     return final_df, current_stats
 
 def run_app():
-    st.title("📊 매크로 자산 & 에너지 추세 분석 (Final)")
-    st.markdown("##### ⬛ 굵은 실선: 에너지 추세(MA 30) | ⬛ 점선: 실시간 에너지 | 🌙 에러 수정 및 노이즈 제거 완료")
+    st.title("📊 매크로 자산 & 듀얼 에너지 이평 분석")
+    st.markdown("##### ⬛ 굵은선: MA 30 (장기추세) | ⬛ 얇은선: MA 10 (단기흐름) | 🌙 노이즈 제거 모드")
 
     df, stats = get_performance_data()
     if df is None:
@@ -82,7 +80,7 @@ def run_app():
 
     fig = go.Figure()
     
-    # 1. 개별 자산
+    # 1. 개별 자산 수익률
     for sym, info in tickers_info.items():
         if sym in df.columns:
             fig.add_trace(go.Scatter(
@@ -92,24 +90,26 @@ def run_app():
                 connectgaps=True 
             ))
 
-    # 2. 변동성 에너지
-    if 'Energy_Raw' in df.columns:
+    # 2. 듀얼 이평선 (실시간 점선은 제거됨)
+    if 'MA10' in df.columns and 'MA30' in df.columns:
+        # 단기 이평선 (MA 10)
         fig.add_trace(go.Scatter(
-            x=df.index, y=df['Energy_Raw'],
-            name="실시간 에너지",
-            line=dict(color='rgba(0,0,0,0.2)', width=1, dash='dot'),
+            x=df.index, y=df['MA10'],
+            name="에너지 MA 10",
+            line=dict(color='rgba(0,0,0,0.6)', width=1.5),
             connectgaps=True
         ))
         
+        # 장기 이평선 (MA 30)
         fig.add_trace(go.Scatter(
-            x=df.index, y=df['Energy_MA30'],
-            name="에너지 추세(MA 30)",
+            x=df.index, y=df['MA30'],
+            name="에너지 MA 30",
             line=dict(color='black', width=4),
             connectgaps=True,
-            hovertemplate="에너지 추세(MA30): %{y:.2f}%<extra></extra>"
+            hovertemplate="장기 추세(MA30): %{y:.2f}%<extra></extra>"
         ))
 
-    # 기준선
+    # 기준선 (금요일 13시)
     friday_lines = df.index[(df.index.weekday == 4) & (df.index.hour == 13) & (df.index.minute == 0)]
     for f_line in friday_lines:
         fig.add_vline(x=f_line, line_width=1, line_dash="dot", line_color="red")
@@ -124,14 +124,14 @@ def run_app():
     st.plotly_chart(fig, use_container_width=True)
     
     # 지표 카드
-    cols = st.columns(len(tickers_info) + 1)
+    cols = st.columns(len(tickers_info) + 2)
     for i, sym in enumerate(tickers_info.keys()):
         if sym in stats:
             cols[i].metric(tickers_info[sym]['name'], f"{stats[sym]['price']:,.2f}", f"{stats[sym]['ret']:.2f}%")
     
-    if 'Energy_MA30' in df.columns:
-        curr_ma = df['Energy_MA30'].iloc[-1]
-        cols[-1].metric("에너지 추세(MA30)", f"{curr_ma:.2f}%")
+    if 'MA10' in df.columns:
+        cols[-2].metric("MA 10", f"{df['MA10'].iloc[-1]:.2f}%")
+        cols[-1].metric("MA 30", f"{df['MA30'].iloc[-1]:.2f}%")
 
 if __name__ == "__main__":
     run_app()
