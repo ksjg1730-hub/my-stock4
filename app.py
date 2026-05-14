@@ -6,12 +6,12 @@ import yfinance as yf
 from datetime import datetime, timedelta
 
 # 1. 페이지 설정
-st.set_page_config(page_title="Silver Top 1 Duel", layout="wide")
-st.title("🏆 은(Silver) 챔피언 결투: 6개월 1위 vs 주간 1위")
+st.set_page_config(page_title="Silver Weekly Champ 6Mo", layout="wide")
+st.title("🏆 은(Silver) 주간 1위 챔피언: 6개월 분석 궤적")
 
 # 2. 데이터 수집 (6개월치, 1시간봉)
 @st.cache_data(ttl=600)
-def get_silver_data_full():
+def get_silver_data_6mo():
     try:
         silver = yf.Ticker("SI=F")
         df = silver.history(period="6mo", interval="1h")
@@ -19,16 +19,17 @@ def get_silver_data_full():
         df = df.reset_index()
         df = df[['Datetime', 'Close']].rename(columns={'Datetime': 'Time', 'Close': 'Price'})
         df['Time'] = df['Time'].dt.tz_convert('Asia/Seoul')
+        # 주말 데이터 제거
         df = df[df['Time'].dt.weekday < 5].copy()
         return df
     except Exception as e:
         st.error(f"데이터 오류: {e}")
         return None
 
-# 3. 챔피언 선발 및 수익률 계산 엔진
-def select_champions(df):
+# 3. 주간 1위 선발 엔진
+def find_weekly_champion(df):
     now = df['Time'].iloc[-1]
-    # 이번 주 금요일 01:00 기준점 (주간 리셋용)
+    # 이번 주 리셋 기준점 (금요일 01:00)
     last_fri = now - timedelta(days=(now.weekday() - 4) % 7)
     if now.weekday() == 4 and now.hour < 1: last_fri -= timedelta(days=7)
     ref_time = last_fri.replace(hour=1, minute=0, second=0, microsecond=0)
@@ -37,40 +38,39 @@ def select_champions(df):
     weekly_mask = df['Time'] >= ref_time
     price_weekly = df.loc[weekly_mask, 'Price'].values
     
-    all_agents = []
+    agents = []
     for i in range(1, 151):
+        # 150명의 선수에게 다양한 성격(이평선, 임계값) 부여
         window = np.random.randint(15, 65)
         threshold = np.random.uniform(0.0004, 0.002)
         
-        # 전체 6개월 신호 및 수익률
+        # 전체 기간 신호 계산
         ma_all = pd.Series(price_all).rolling(window=window).mean().values
         sig_all = np.where(price_all > ma_all * (1 + threshold), 1, 0)
-        ret_all = np.diff(price_all) / price_all[:-1]
+        ret_all = np.diff(price_all) / price_array[:-1] if 'price_array' in locals() else np.diff(price_all) / price_all[:-1]
         cum_all = np.concatenate([[0], np.cumsum(sig_all[:-1] * ret_all * 2)]) * 100
         
-        # 주간 신호 및 수익률 (금요일 1시 기준 0% 시작)
-        ma_w = pd.Series(price_weekly).rolling(window=window).mean().values
-        sig_w = np.where(price_weekly > ma_w * (1 + threshold), 1, 0)
-        ret_w = np.diff(price_weekly) / price_weekly[:-1]
-        cum_w = np.concatenate([[0], np.cumsum(sig_w[:-1] * ret_w * 2)]) * 100
-        
-        all_agents.append({
+        # 주간 성과 계산 (선발 기준)
+        if len(price_weekly) > 1:
+            ma_w = pd.Series(price_weekly).rolling(window=window).mean().values
+            sig_w = np.where(price_weekly > ma_w * (1 + threshold), 1, 0)
+            ret_w = np.diff(price_weekly) / price_weekly[:-1]
+            final_w = np.sum(sig_w[:-1] * ret_w * 2) * 100
+        else:
+            final_w = -999
+            
+        agents.append({
             'id': f"{i}호",
-            'cum_all': cum_all,
-            'sig_all': sig_all,
-            'final_all': cum_all[-1],
-            'cum_w': cum_w,
-            'sig_w': sig_w,
-            'final_w': cum_w[-1]
+            'equity': cum_all,
+            'signals': sig_all,
+            'final_w': final_w
         })
     
-    # 6개월 1위와 주간 1위 선발
-    top_6mo = sorted(all_agents, key=lambda x: x['final_all'], reverse=True)[0]
-    top_weekly = sorted(all_agents, key=lambda x: x['final_w'], reverse=True)[0]
-    return top_6mo, top_weekly, df[weekly_mask]
+    # 이번 주 수익률이 가장 높은 선수 1명만 선발
+    return sorted(agents, key=lambda x: x['final_w'], reverse=True)[0]
 
-# 4. 세그먼트 그리기 함수 (매수: 레드, 청산: 그린)
-def draw_top_path(fig, time, equity, signals, name, opacity=1.0):
+# 4. 구간별 선 그리기 (매수: 레드, 청산: 그린)
+def draw_champ_path(fig, time, equity, signals, name):
     change_points = np.where(np.diff(signals) != 0)[0] + 1
     start_idx = 0
     for end_idx in list(change_points) + [len(signals)]:
@@ -80,43 +80,48 @@ def draw_top_path(fig, time, equity, signals, name, opacity=1.0):
             x=time[start_idx:end_idx+1], 
             y=equity[start_idx:end_idx+1],
             mode='lines',
-            line=dict(color=color, width=4 if curr_sig == 1 else 1.5),
-            opacity=opacity,
-            name=f"{name} ({'BUY' if curr_sig==1 else 'CASH'})",
-            legendgroup=name,
-            showlegend=True if start_idx == 0 else False
+            line=dict(color=color, width=3 if curr_sig == 1 else 1.2),
+            name=f"{name} ({'매수' if curr_sig==1 else '청산'})",
+            showlegend=True if start_idx == 0 else False,
+            legendgroup=name
         ))
         start_idx = end_idx
 
-# 실행
-raw_df = get_silver_data_full()
-if raw_df is not None:
-    top_6mo, top_weekly, weekly_df = select_champions(raw_df)
+# 실행 로직
+df = get_silver_data_6mo()
+if df is not None:
+    champ = find_weekly_champion(df)
     
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.subheader("📊 주간 수익률 레이스 (Top 1 매치업)")
+        st.subheader(f"📊 주간 1위({champ['id']})의 6개월 누적 수익 궤적")
         fig = go.Figure()
         
-        # 6개월 챔피언의 주간 성적 (점선 스타일)
-        draw_top_path(fig, weekly_df['Time'].values, top_6mo['cum_w'], top_6mo['sig_w'], f"6개월왕 {top_6mo['id']}", opacity=0.6)
-        
-        # 주간 챔피언의 성적 (실선 스타일)
-        draw_top_path(fig, weekly_df['Time'].values, top_weekly['cum_w'], top_weekly['sig_w'], f"주간왕 {top_weekly['id']}")
+        # 월간 구분선 표시
+        month_starts = df[df['Time'].dt.day == 1]
+        for m_time in month_starts['Time']:
+            fig.add_vline(x=m_time, line_width=1, line_dash="dash", line_color="white", opacity=0.3)
+
+        # 주간 1위 선수만 그래프에 드로잉
+        draw_champ_path(fig, df['Time'].values, champ['equity'], champ['signals'], champ['id'])
         
         fig.update_layout(
             template="plotly_dark", plot_bgcolor='black',
-            yaxis_title="주간 수익률 (%)",
+            yaxis_title="6개월 누적 수익률 (%)",
+            xaxis_title="한국 시간 (KST)",
             legend=dict(orientation="h", y=1.1, x=0.5, xanchor="center")
         )
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
-        st.subheader("🏆 현재 랭킹")
-        st.info(f"**6개월 1위: {top_6mo['id']}**\n\n주간 수익: {top_6mo['final_w']:+.2f}%")
-        st.success(f"**주간 1위: {top_weekly['id']}**\n\n주간 수익: {top_weekly['final_w']:+.2f}%")
+        st.subheader("🥇 주간 챔피언 정보")
+        st.success(f"**현재 1위: {champ['id']} 선수**")
+        st.write(f"이번 주 수익: {champ['final_w']:+.2f}%")
+        st.write(f"6개월 총수익: {champ['equity'][-1]:+.2f}%")
+        st.write("---")
         
-        current_price = raw_df['Price'].iloc[-1]
-        st.metric("현재 은 시세", f"${current_price:.2f}")
-
-    st.sidebar.markdown("### 🎨 범례\n- **레드(Red)**: 매수 포지션\n- **그린(Green)**: 청산(현금) 상태")
+        last_sig = champ['signals'][-1]
+        status = "🔴 현재 매수 중" if last_sig == 1 else "🟢 현재 청산(대기) 중"
+        st.info(status)
+        
+    st.sidebar.markdown("### 🎨 색상 가이드\n- **레드(Red)**: 매수 구간\n- **그린(Green)**: 청산 구간")
