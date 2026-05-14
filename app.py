@@ -6,30 +6,28 @@ import yfinance as yf
 from datetime import datetime, timedelta
 
 # 1. 페이지 설정
-st.set_page_config(page_title="Silver 4-Week Winner Relay", layout="wide")
-st.title("🏆 은(Silver) 최근 4주 승자 릴레이: 매주 1위가 바뀌는 성배 궤적")
+st.set_page_config(page_title="Silver 15m 4-Week Relay", layout="wide")
+st.title("⏱️ 은(Silver) 15분봉 초정밀 릴레이: 최근 1달 승자 궤적")
 
-# 2. 데이터 수집 (최근 1개월, 1시간봉)
+# 2. 데이터 수집 (15분봉 데이터)
 @st.cache_data(ttl=600)
-def get_silver_data_4w():
+def get_silver_data_15m():
     try:
         silver = yf.Ticker("SI=F")
-        # 최근 1개월(1mo) 데이터를 1시간(1h) 단위로 수집
-        df = silver.history(period="1mo", interval="1h")
+        # 15분봉(15m)은 최근 60일까지만 제공됨 (1달 분석 가능)
+        df = silver.history(period="1mo", interval="15m")
         if df.empty: return None
         df = df.reset_index()
         df = df[['Datetime', 'Close']].rename(columns={'Datetime': 'Time', 'Close': 'Price'})
         df['Time'] = df['Time'].dt.tz_convert('Asia/Seoul')
-        # 주말 데이터 제외
         df = df[df['Time'].dt.weekday < 5].copy()
         return df
     except Exception as e:
         st.error(f"데이터 오류: {e}")
         return None
 
-# 3. 주 단위로 1위를 새로 선발하여 연결하는 엔진
-def run_4w_relay_engine(df):
-    # 주차별 그룹핑 (연도-주차)
+# 3. 15분봉 기반 주간 1위 선발 엔진
+def run_15m_relay_engine(df):
     df['week_grp'] = df['Time'].dt.strftime('%Y-%U')
     unique_weeks = df['week_grp'].unique()
     
@@ -37,20 +35,20 @@ def run_4w_relay_engine(df):
     relay_signals = [0]
     relay_ids = []
     
-    # 150명의 선수 설정
+    # 150명의 선수 설정 (15분봉에 맞는 파라미터)
     agent_configs = []
     for i in range(1, 151):
         agent_configs.append({
             'id': f"{i}호",
-            'window': np.random.randint(12, 45), # 최근 장세에 맞춰 조금 더 빠른 호흡
-            'threshold': np.random.uniform(0.0003, 0.0012)
+            'window': np.random.randint(20, 100), # 15분봉이므로 더 긴 윈도우 사용
+            'threshold': np.random.uniform(0.0002, 0.001) # 더 정밀한 문턱값
         })
 
     last_total_equity = 0
     
     for week in unique_weeks:
         week_df = df[df['week_grp'] == week].copy()
-        if len(week_df) < 2: continue
+        if len(week_df) < 5: continue
         
         prices = week_df['Price'].values
         returns = np.diff(prices) / prices[:-1]
@@ -58,8 +56,8 @@ def run_4w_relay_engine(df):
         best_week_return = -999
         best_agent_data = None
         
-        # 해당 주차의 최고 수익률 선수 선발
         for config in agent_configs:
+            # 15분봉 이평선 계산
             ma = pd.Series(prices).rolling(window=config['window']).mean().values
             signals = np.where(prices > ma * (1 + config['threshold']), 1, 0)
             
@@ -74,7 +72,7 @@ def run_4w_relay_engine(df):
                     'returns': signals[:-1] * returns * 2 * 100
                 }
         
-        # 1위 선수의 데이터를 누적 궤적에 병합
+        # 데이터 병합
         current_week_equity = np.cumsum(np.concatenate([[0], best_agent_data['returns']]))
         relay_equity.extend(list(current_week_equity[1:] + last_total_equity))
         relay_signals.extend(list(best_agent_data['signals'][1:]))
@@ -82,61 +80,61 @@ def run_4w_relay_engine(df):
         
         last_total_equity = relay_equity[-1]
 
-    # 데이터 길이 불일치 방지
-    final_len = len(relay_equity)
-    return relay_equity, relay_signals, relay_ids, df.iloc[:final_len]
+    return relay_equity, relay_signals, relay_ids, df.iloc[:len(relay_equity)]
 
-# 4. 구간별 선 그리기 (매수: 레드 / 청산: 그린)
-def draw_relay_path_4w(fig, time, equity, signals, ids):
-    for j in range(len(signals) - 1):
-        # 매수(1)면 레드, 청산(0)이면 그린
-        color = "#FF0000" if signals[j] == 1 else "#00FF00"
+# 4. 시각화 함수 (레드/그린)
+def draw_relay_15m(fig, time, equity, signals, ids):
+    # 속도를 위해 벡터화된 방식 사용 가능하나, 색상 변경을 위해 세그먼트 드로잉
+    # 15분봉은 데이터가 많으므로 변화 지점만 추출
+    change_points = np.where(np.diff(signals) != 0)[0] + 1
+    start_idx = 0
+    for end_idx in list(change_points) + [len(signals)]:
+        curr_sig = signals[start_idx]
+        color = "#FF0000" if curr_sig == 1 else "#00FF00"
         fig.add_trace(go.Scatter(
-            x=time[j:j+2], 
-            y=equity[j:j+2],
+            x=time[start_idx:end_idx+1], 
+            y=equity[start_idx:end_idx+1],
             mode='lines',
-            line=dict(color=color, width=4 if signals[j] == 1 else 2),
-            hoverinfo='text',
-            text=f"챔피언: {ids[j]}",
+            line=dict(color=color, width=2.5 if curr_sig == 1 else 1.2),
+            hoverinfo='skip',
             showlegend=False
         ))
+        start_idx = end_idx
 
-# 메인 실행
-df = get_silver_data_4w()
+# 실행
+df = get_silver_data_15m()
 if df is not None:
-    equity, signals, ids, plot_df = run_4w_relay_engine(df)
+    equity, signals, ids, plot_df = run_15m_relay_engine(df)
     
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.subheader("📊 최근 4주 챔피언 릴레이 궤적")
+        st.subheader("⏱️ 15분봉 정밀 분석: 최근 1달 릴레이")
         fig = go.Figure()
         
-        # 주간 경계선 (노란 점선)
+        # 1위 교체 지점 (노란 선)
         week_changes = np.where(np.array(ids[:-1]) != np.array(ids[1:]))[0]
         for idx in week_changes:
-            fig.add_vline(x=plot_df['Time'].iloc[idx], line_width=1.5, line_dash="dot", line_color="yellow")
+            fig.add_vline(x=plot_df['Time'].iloc[idx], line_width=1, line_dash="dot", line_color="yellow")
 
-        draw_relay_path_4w(fig, plot_df['Time'].values, equity, signals, ids)
+        draw_relay_15m(fig, plot_df['Time'].values, equity, signals, ids)
         
         fig.update_layout(
             template="plotly_dark", plot_bgcolor='black',
-            yaxis_title="최근 4주 누적 수익률 (%)",
-            xaxis_title="매주 금요일 01:00 승자 교체 (노란 점선)",
+            yaxis_title="누적 수익률 (%)",
+            xaxis_title="15분 단위 정밀 궤적",
             hovermode="x"
         )
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
-        st.subheader("🥇 현재의 승자")
-        current_winner = ids[-1]
-        st.success(f"**현재 지휘 중: {current_winner}**")
-        st.write(f"최종 누적 수익: {equity[-1]:+.2f}%")
-        st.write("---")
+        st.subheader("🥇 실시간 챔피언")
+        st.success(f"**현재 지휘: {ids[-1]}**")
+        st.metric("최종 수익률", f"{equity[-1]:+.2f}%")
         
         last_sig = signals[-1]
         if last_sig == 1:
-            st.error("🔴 현재 매수(BUY) 유지")
+            st.error("🔴 15분봉: 매수 유지")
         else:
-            st.success("🟢 현재 청산(CASH) 대기")
-        
-        st.caption("최근 4주간 매주 금요일 01:00에 가장 수익이 높았던 선수가 바통을 이어받은 결과입니다.")
+            st.success("🟢 15분봉: 청산 완료")
+            
+        st.info(f"데이터 포인트: {len(plot_df)}개")
