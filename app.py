@@ -69,6 +69,8 @@ def get_performance_data():
         return 0.0
 
     raw_energy = pos_ret_df.apply(get_bull_energy, axis=1)
+    
+    # 이평선 계산
     final_df['MA20'] = raw_energy.rolling(window=20, min_periods=1).mean()
     final_df['MA50'] = raw_energy.rolling(window=50, min_periods=1).mean()
     
@@ -76,59 +78,69 @@ def get_performance_data():
 
 def run_app():
     st.title("📊 에너지 크로스 시점 분석 대시보드")
-    st.markdown("##### 🔴 **빨간선: 골든크로스(UP)** | 🔵 **파란선: 데드크로스(DOWN)** | 🟢 **초록구간: 주도주 에너지 하락**")
+    st.markdown("##### 🔴 **빨간선: UP (Golden)** | 🔵 **파란선: DOWN (Dead)** | 🟢 **실시간 1등 에너지 음전 시 초록색 전환**")
 
     df, stats = get_performance_data()
     if df is None:
         st.info("데이터를 불러오는 중입니다...")
         return
 
-    # 동적 상태 계산
+    # 1. 상태 계산
     vol_targets = list(tickers_info.keys())
     df['current_top'] = df[vol_targets].idxmax(axis=1)
     ma20_diff = df['MA20'].diff().fillna(0)
     ma50_diff = df['MA50'].diff().fillna(0)
     is_crisis = (ma20_diff < 0) | (ma50_diff < 0)
 
-    # --- [크로스 시점 계산] ---
-    # MA20이 MA50을 돌파하는 지점 찾기
+    # 2. 크로스 로직 보정
     df['prev_MA20'] = df['MA20'].shift(1)
     df['prev_MA50'] = df['MA50'].shift(1)
-    
-    # Golden Cross: 이전에는 MA20 < MA50 이었는데 현재 MA20 >= MA50
     up_cross = df[(df['prev_MA20'] < df['prev_MA50']) & (df['MA20'] >= df['MA50'])].index
-    # Dead Cross: 이전에는 MA20 > MA50 이었는데 현재 MA20 <= MA50
     down_cross = df[(df['prev_MA20'] > df['prev_MA50']) & (df['MA20'] <= df['MA50'])].index
 
     fig = go.Figure()
 
-    # 1. 자산별 동적 렌더링
+    # 3. 자산별 렌더링 (동적 색상 전환)
     for sym, info in tickers_info.items():
         if sym in df.columns:
             is_target_crisis = (df['current_top'] == sym) & is_crisis
             
-            # 정상/비주도
+            # 일반 구간
             y_normal = df[sym].copy()
             y_normal[is_target_crisis] = np.nan
-            fig.add_trace(go.Scatter(x=df.index, y=y_normal, name=info['name'], 
-                                     line=dict(color=info['color'], width=info['width']), connectgaps=False))
+            fig.add_trace(go.Scatter(
+                x=df.index, y=y_normal, name=info['name'],
+                line=dict(color=info['color'], width=info['width']),
+                connectgaps=False
+            ))
             
-            # 위기(음전)
+            # 음전 위기 구간
             y_crisis = df[sym].copy()
             y_crisis[~is_target_crisis] = np.nan
-            fig.add_trace(go.Scatter(x=df.index, y=y_crisis, name=f"{info['name']}(위기)", 
-                                     line=dict(color='#2ECC71', width=info['width'] + 2.5), showlegend=False, connectgaps=False))
+            fig.add_trace(go.Scatter(
+                x=df.index, y=y_crisis, name=f"{info['name']}(위기)",
+                line=dict(color='#2ECC71', width=info['width'] + 2.5),
+                showlegend=False, connectgaps=False
+            ))
 
-    # 2. 에너지 이평선
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], name="에너지 MA20", line=dict(color='black', width=2, opacity=0.3)))
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA50'], name="에너지 MA50", line=dict(color='black', width=3, dash='dot', opacity=0.3)))
+    # 4. 에너지 이평선 (오류 수정: opacity 위치 변경)
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df['MA20'], name="에너지 MA20",
+        line=dict(color='black', width=1.5),
+        opacity=0.3  # line 외부로 이동
+    ))
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df['MA50'], name="에너지 MA50",
+        line=dict(color='black', width=2.5, dash='dot'),
+        opacity=0.3  # line 외부로 이동
+    ))
 
-    # 3. 크로스 수직선 추가
+    # 5. 수직 직선 추가
     for t in up_cross:
-        fig.add_vline(x=t, line_width=2, line_dash="dash", line_color="red", annotation_text="UP")
+        fig.add_vline(x=t, line_width=1.5, line_dash="dash", line_color="red", opacity=0.6)
     
     for t in down_cross:
-        fig.add_vline(x=t, line_width=2, line_dash="dash", line_color="blue", annotation_text="DOWN")
+        fig.add_vline(x=t, line_width=1.5, line_dash="dash", line_color="blue", opacity=0.6)
 
     fig.update_layout(
         hovermode="x unified", height=850, template="plotly_white",
