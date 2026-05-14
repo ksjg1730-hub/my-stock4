@@ -5,7 +5,7 @@ import numpy as np
 import plotly.graph_objects as go
 
 # 1. 페이지 설정
-st.set_page_config(page_title="24H 매크로 추세 분석기", layout="wide")
+st.set_page_config(page_title="24H 매크로 듀얼 이평 분석", layout="wide")
 
 # 2. 종목 설정
 tickers_info = {
@@ -30,7 +30,7 @@ def get_performance_data():
             else:
                 close = df['Close']
 
-            # 0 또는 결측치 보정
+            # 데이터가 0인 구간을 완전히 제거하여 '뚝 떨어짐' 근본적 차단
             close = close.replace(0, np.nan).dropna()
             
             if close.index.tz is None:
@@ -48,7 +48,10 @@ def get_performance_data():
             
             if sym == 'DX-Y.NYB': ret *= 5
             
-            current_stats[sym] = {'price': close.iloc[-1], 'ret': ret.iloc[-1]}
+            # [추가 보정] 수익률이 정확히 0인 데이터도 계산에서 제외 (이평선 왜곡 방지)
+            ret = ret.replace(0, np.nan)
+            
+            current_stats[sym] = {'price': close.iloc[-1], 'ret': ret.dropna().iloc[-1]}
             ret.name = sym
             combined_df.append(ret)
         except: continue
@@ -56,22 +59,22 @@ def get_performance_data():
     if not combined_df: return None, {}
     final_df = pd.concat(combined_df, axis=1)
     
-    # --- [에너지 합계 기반 이평선 계산] ---
+    # --- [이평선 왜곡 방지 로직] ---
     vol_targets = list(tickers_info.keys())
     available_targets = [t for t in vol_targets if t in final_df.columns]
     
-    # 기초 에너지 값 (절대값 합산 * 0.5)
+    # 1. 절대값 합산 시 데이터가 있는 것들만 사용 (min_count=1)
     raw_energy = final_df[available_targets].abs().sum(axis=1, min_count=1) * 0.5
     
-    # 단기(10) 및 장기(30) 이평선 생성
+    # 2. 이평선 계산 (데이터가 없는 구간은 직전 값을 유지하거나 건너뜀)
     final_df['MA10'] = raw_energy.rolling(window=10, min_periods=1).mean()
     final_df['MA30'] = raw_energy.rolling(window=30, min_periods=1).mean()
     
     return final_df, current_stats
 
 def run_app():
-    st.title("📊 매크로 자산 & 듀얼 에너지 이평 분석")
-    st.markdown("##### ⬛ 굵은선: MA 30 (장기추세) | ⬛ 얇은선: MA 10 (단기흐름) | 🌙 노이즈 제거 모드")
+    st.title("📊 매크로 자산 & 듀얼 에너지 이평 분석 (No-Drop)")
+    st.markdown("##### ⬛ 굵은선: MA 30 | ⬛ 얇은선: MA 10 | 🌙 모든 0값 데이터 보정 완료")
 
     df, stats = get_performance_data()
     if df is None:
@@ -80,36 +83,34 @@ def run_app():
 
     fig = go.Figure()
     
-    # 1. 개별 자산 수익률
+    # 1. 개별 자산 (선 끊김 현상 보정)
     for sym, info in tickers_info.items():
         if sym in df.columns:
             fig.add_trace(go.Scatter(
                 x=df.index, y=df[sym],
                 name=f"{info['name']} ({stats[sym]['ret']:+.2f}%)",
                 line=dict(color=info['color'], width=info['width']),
-                connectgaps=True 
+                connectgaps=True # 데이터가 없는 구간을 부드럽게 연결
             ))
 
-    # 2. 듀얼 이평선 (실시간 점선은 제거됨)
+    # 2. 듀얼 이평선
     if 'MA10' in df.columns and 'MA30' in df.columns:
-        # 단기 이평선 (MA 10)
         fig.add_trace(go.Scatter(
             x=df.index, y=df['MA10'],
             name="에너지 MA 10",
-            line=dict(color='rgba(0,0,0,0.6)', width=1.5),
+            line=dict(color='rgba(0,0,0,0.5)', width=1.2),
             connectgaps=True
         ))
         
-        # 장기 이평선 (MA 30)
         fig.add_trace(go.Scatter(
             x=df.index, y=df['MA30'],
             name="에너지 MA 30",
-            line=dict(color='black', width=4),
+            line=dict(color='black', width=3.5),
             connectgaps=True,
             hovertemplate="장기 추세(MA30): %{y:.2f}%<extra></extra>"
         ))
 
-    # 기준선 (금요일 13시)
+    # 금요일 13시 기준선
     friday_lines = df.index[(df.index.weekday == 4) & (df.index.hour == 13) & (df.index.minute == 0)]
     for f_line in friday_lines:
         fig.add_vline(x=f_line, line_width=1, line_dash="dot", line_color="red")
@@ -123,7 +124,7 @@ def run_app():
 
     st.plotly_chart(fig, use_container_width=True)
     
-    # 지표 카드
+    # 메트릭 섹션
     cols = st.columns(len(tickers_info) + 2)
     for i, sym in enumerate(tickers_info.keys()):
         if sym in stats:
