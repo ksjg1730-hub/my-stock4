@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 # 1. 페이지 설정
 st.set_page_config(page_title="24H 매크로 변동성 분석기", layout="wide")
 
-# 2. 종목 설정
+# 2. 종목 설정 (4대 매크로 자산)
 tickers_info = {
     'HG=F': {'name': '국제 구리', 'color': '#D35400', 'width': 2},
     'SI=F': {'name': '글로벌 은', 'color': '#7F8C8D', 'width': 2},
@@ -21,7 +21,6 @@ def get_performance_data():
     
     for sym, info in tickers_info.items():
         try:
-            # 뚝뚝 떨어지는 현상을 방지하기 위해 충분한 데이터를 가져옴
             df = yf.download(sym, period='1mo', interval='15m', progress=False)
             if df.empty: continue
             
@@ -30,7 +29,7 @@ def get_performance_data():
             else:
                 close = df['Close']
 
-            # 값이 0이거나 결측치인 경우 제거하여 '뚝 떨어짐' 방지
+            # 0 또는 결측치 제거로 '뚝 떨어짐' 방지
             close = close.replace(0, pd.NA).dropna()
             
             if close.index.tz is None:
@@ -56,21 +55,24 @@ def get_performance_data():
     if not combined_df: return None, {}
     final_df = pd.concat(combined_df, axis=1)
     
-    # --- [변동성 에너지: MA 30 적용] ---
+    # --- [실시간 에너지 뚝 떨어짐 방지 로직] ---
     vol_targets = list(tickers_info.keys())
     available_targets = [t for t in vol_targets if t in final_df.columns]
     
-    # 1. 실시간 에너지 (절대값 합산 * 0.5)
-    final_df['Energy_Raw'] = final_df[available_targets].abs().sum(axis=1) * 0.5
+    # skipna=True를 통해 데이터가 없는 시점에도 '있는 데이터만'으로 합산 진행
+    final_df['Energy_Raw'] = final_df[available_targets].abs().sum(axis=1, skipna=True) * 0.5
     
-    # 2. 장기 이동평균선 (30주기 설정)
+    # 합산값이 0인 경우(완전 공백)를 NaN으로 처리하여 그래프 연결 방해 요소 제거
+    final_df['Energy_Raw'] = final_df['Energy_Raw'].replace(0, pd.NA)
+    
+    # 장기 이동평균선 (30주기)
     final_df['Energy_MA30'] = final_df['Energy_Raw'].rolling(window=30, min_periods=1).mean()
     
     return final_df, current_stats
 
 def run_app():
-    st.title("📊 매크로 자산 & 에너지 추세 분석 (MA 30)")
-    st.markdown("##### ⬛ 굵은 실선: 에너지 장기 추세(MA 30) | ⬛ 점선: 실시간 에너지 | 🌙 데이터 공백 보정 완료")
+    st.title("📊 매크로 자산 & 에너지 추세 분석 (Fixed)")
+    st.markdown("##### ⬛ 굵은 실선: 에너지 추세(MA 30) | ⬛ 점선: 실시간 에너지 | 🌙 모든 하락 노이즈 보정 완료")
 
     df, stats = get_performance_data()
     if df is None:
@@ -79,34 +81,36 @@ def run_app():
 
     fig = go.Figure()
     
-    # 1. 개별 자산
+    # 1. 개별 자산 (뚝 떨어짐 제거)
     for sym, info in tickers_info.items():
         if sym in df.columns:
             fig.add_trace(go.Scatter(
                 x=df.index, y=df[sym],
                 name=f"{info['name']} ({stats[sym]['ret']:+.2f}%)",
                 line=dict(color=info['color'], width=info['width']),
-                connectgaps=True # 선이 끊기지 않고 이어지도록 설정
+                connectgaps=True 
             ))
 
-    # 2. 변동성 에너지 (MA 30 중심)
+    # 2. 변동성 에너지 (실시간 및 이평선 모두 보정)
     if 'Energy_Raw' in df.columns:
+        # 실시간 에너지 (점선)
         fig.add_trace(go.Scatter(
             x=df.index, y=df['Energy_Raw'],
             name="실시간 에너지",
             line=dict(color='rgba(0,0,0,0.2)', width=1, dash='dot'),
-            connectgaps=True
+            connectgaps=True # 실시간 선도 뚝 끊기지 않게 연결
         ))
         
+        # 에너지 장기 추세 (실선)
         fig.add_trace(go.Scatter(
             x=df.index, y=df['Energy_MA30'],
             name="에너지 추세(MA 30)",
             line=dict(color='black', width=4),
             connectgaps=True,
-            hovertemplate="평균 에너지(MA30): %{y:.2f}%<extra></extra>"
+            hovertemplate="에너지 추세(MA30): %{y:.2f}%<extra></extra>"
         ))
 
-    # 기준선
+    # 기준선 (금요일 13시)
     friday_lines = df.index[(df.index.weekday == 4) & (df.index.hour == 13) & (df.index.minute == 0)]
     for f_line in friday_lines:
         fig.add_vline(x=f_line, line_width=1, line_dash="dot", line_color="red")
@@ -120,7 +124,7 @@ def run_app():
 
     st.plotly_chart(fig, use_container_width=True)
     
-    # 메트릭 카드
+    # 지표 카드
     cols = st.columns(len(tickers_info) + 1)
     for i, sym in enumerate(tickers_info.keys()):
         if sym in stats:
