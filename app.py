@@ -1,155 +1,88 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from datetime import datetime
 
-# 1. 페이지 설정
-st.set_page_config(page_title="24H 매크로 크로스 분석 시스템", layout="wide")
+# 1. 설정 및 가상 데이터 생성 (실제 API 연결 전 시뮬레이션용)
+st.set_page_config(page_title="Silver Race 150", layout="wide")
+st.title("🏆 글로벌 은(Silver) 가격 150인 경주: 상위 5선 전략")
 
-# 2. 종목 설정
-tickers_info = {
-    'HG=F': {'name': '국제 구리', 'color': '#D35400', 'width': 1.5},
-    'SI=F': {'name': '글로벌 은', 'color': '#F1C40F', 'width': 2.5},
-    'CL=F': {'name': 'WTI 원유', 'color': '#27AE60', 'width': 1.5},
-    'DX-Y.NYB': {'name': '달러지수(x5)', 'color': '#2C3E50', 'width': 1.5}
-}
+@st.cache_data
+def generate_silver_data():
+    """글로벌 은 가격 10분봉 가상 데이터 생성"""
+    np.random.seed(42)
+    times = pd.date_range(start="2026-05-01", periods=200, freq='10T')
+    prices = 85 + np.cumsum(np.random.normal(0, 0.5, size=200)) # 85달러 기준 파동
+    return pd.DataFrame({'Time': times, 'Price': prices})
 
-@st.cache_data(ttl=60)
-def get_performance_data():
-    combined_df = []
-    current_stats = {}
+# 2. 150명의 선수(전략) 로직 엔진
+def run_150_agents(df):
+    agents_results = []
+    price_array = df['Price'].values
     
-    for sym, info in tickers_info.items():
-        try:
-            df = yf.download(sym, period='1mo', interval='15m', progress=False)
-            if df.empty: continue
-            
-            if isinstance(df.columns, pd.MultiIndex):
-                close = df['Close'][sym]
-            else:
-                close = df['Close']
-
-            close = close.replace(0, np.nan).ffill()
-            
-            if close.index.tz is None:
-                close.index = close.index.tz_localize('UTC').tz_convert('Asia/Seoul')
-            else:
-                close.index = close.index.tz_convert('Asia/Seoul')
-
-            year_week = close.index.strftime('%G-%V')
-            def get_base_price(series):
-                target = series[(series.index.weekday == 4) & (series.index.hour == 13)]
-                return target.iloc[0] if not target.empty else series.iloc[0]
-
-            base_price = close.groupby(year_week).transform(get_base_price)
-            ret = ((close - base_price) / base_price * 100)
-            
-            if sym == 'DX-Y.NYB': ret *= 5
-            
-            ret = ret.ffill()
-            current_stats[sym] = {'price': close.iloc[-1], 'ret': ret.iloc[-1]}
-            ret.name = sym
-            combined_df.append(ret)
-        except: continue
-            
-    if not combined_df: return None, {}
-    final_df = pd.concat(combined_df, axis=1).ffill()
+    for i in range(1, 151):
+        # 각 선수마다 고유한 성격(변수) 부여
+        window = np.random.randint(5, 30)  # 이격도 기준 기간
+        threshold = np.random.uniform(0.001, 0.005) # 베팅 민감도
+        
+        # 전략: 가격이 이동평균선보다 높으면 빨강(콜), 낮으면 파랑(풋)
+        ma = pd.Series(price_array).rolling(window=window).mean().values
+        signals = np.where(price_array > ma * (1 + threshold), 1, 
+                  np.where(price_array < ma * (1 - threshold), -1, 0))
+        
+        # 수익률 계산
+        returns = np.diff(price_array) / price_array[:-1]
+        strategy_returns = signals[:-1] * returns
+        equity_curve = np.cumprod(1 + strategy_returns)
+        
+        current_color = "🔴 매수(콜)" if signals[-1] == 1 else ("🔵 매도(풋)" if signals[-1] == -1 else "⚪ 관망")
+        
+        agents_results.append({
+            'id': f"{i}호 선수",
+            'equity': equity_curve,
+            'final_return': equity_curve[-1],
+            'current_color': current_color,
+            'color_code': 'red' if signals[-1] == 1 else 'blue' if signals[-1] == -1 else 'gray'
+        })
     
-    vol_targets = list(tickers_info.keys())
-    available_targets = [t for t in vol_targets if t in final_df.columns]
-    pos_ret_df = final_df[available_targets].clip(lower=0)
-    
-    def get_bull_energy(row):
-        valid_values = row.dropna()
-        if len(valid_values) >= 2:
-            return valid_values.nlargest(2).sum() * 0.5
-        elif len(valid_values) == 1:
-            return valid_values.iloc[0] * 0.5
-        return 0.0
+    # 수익률 기준 내림차순 정렬
+    return sorted(agents_results, key=lambda x: x['final_return'], reverse=True)
 
-    raw_energy = pos_ret_df.apply(get_bull_energy, axis=1)
-    
-    # 이평선 계산
-    final_df['MA20'] = raw_energy.rolling(window=20, min_periods=1).mean()
-    final_df['MA50'] = raw_energy.rolling(window=50, min_periods=1).mean()
-    
-    return final_df, current_stats
+# 데이터 로드 및 실행
+df = generate_silver_data()
+top_agents = run_150_agents(df)
 
-def run_app():
-    st.title("📊 에너지 크로스 시점 분석 대시보드")
-    st.markdown("##### 🔴 **빨간선: UP (Golden)** | 🔵 **파란선: DOWN (Dead)** | 🟢 **실시간 1등 에너지 음전 시 초록색 전환**")
+# 3. 대시보드 시각화
+col1, col2 = st.columns([3, 1])
 
-    df, stats = get_performance_data()
-    if df is None:
-        st.info("데이터를 불러오는 중입니다...")
-        return
-
-    # 1. 상태 계산
-    vol_targets = list(tickers_info.keys())
-    df['current_top'] = df[vol_targets].idxmax(axis=1)
-    ma20_diff = df['MA20'].diff().fillna(0)
-    ma50_diff = df['MA50'].diff().fillna(0)
-    is_crisis = (ma20_diff < 0) | (ma50_diff < 0)
-
-    # 2. 크로스 로직 보정
-    df['prev_MA20'] = df['MA20'].shift(1)
-    df['prev_MA50'] = df['MA50'].shift(1)
-    up_cross = df[(df['prev_MA20'] < df['prev_MA50']) & (df['MA20'] >= df['MA50'])].index
-    down_cross = df[(df['prev_MA20'] > df['prev_MA50']) & (df['MA20'] <= df['MA50'])].index
-
+with col1:
+    st.subheader("📊 상위 5개 전략 수익 곡선 (10분봉)")
     fig = go.Figure()
-
-    # 3. 자산별 렌더링 (동적 색상 전환)
-    for sym, info in tickers_info.items():
-        if sym in df.columns:
-            is_target_crisis = (df['current_top'] == sym) & is_crisis
-            
-            # 일반 구간
-            y_normal = df[sym].copy()
-            y_normal[is_target_crisis] = np.nan
-            fig.add_trace(go.Scatter(
-                x=df.index, y=y_normal, name=info['name'],
-                line=dict(color=info['color'], width=info['width']),
-                connectgaps=False
-            ))
-            
-            # 음전 위기 구간
-            y_crisis = df[sym].copy()
-            y_crisis[~is_target_crisis] = np.nan
-            fig.add_trace(go.Scatter(
-                x=df.index, y=y_crisis, name=f"{info['name']}(위기)",
-                line=dict(color='#2ECC71', width=info['width'] + 2.5),
-                showlegend=False, connectgaps=False
-            ))
-
-    # 4. 에너지 이평선 (오류 수정: opacity 위치 변경)
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df['MA20'], name="에너지 MA20",
-        line=dict(color='black', width=1.5),
-        opacity=0.3  # line 외부로 이동
-    ))
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df['MA50'], name="에너지 MA50",
-        line=dict(color='black', width=2.5, dash='dot'),
-        opacity=0.3  # line 외부로 이동
-    ))
-
-    # 5. 수직 직선 추가
-    for t in up_cross:
-        fig.add_vline(x=t, line_width=1.5, line_dash="dash", line_color="red", opacity=0.6)
-    
-    for t in down_cross:
-        fig.add_vline(x=t, line_width=1.5, line_dash="dash", line_color="blue", opacity=0.6)
-
-    fig.update_layout(
-        hovermode="x unified", height=850, template="plotly_white",
-        xaxis=dict(tickformat="%m/%d %H:%M", rangebreaks=[dict(bounds=["sat", "mon"])]),
-        yaxis=dict(title="수익률 / 에너지 (%)", range=[-12, 12], ticksuffix="%", zeroline=True, zerolinecolor='black'),
-        legend=dict(orientation="h", y=1.02, x=1, xanchor="right")
-    )
-
+    for agent in top_agents[:5]:
+        fig.add_trace(go.Scatter(
+            x=df['Time'][1:], 
+            y=agent['equity'], 
+            name=f"{agent['id']} ({agent['current_color']})",
+            mode='lines'
+        ))
+    fig.update_layout(hovermode="x unified", template="plotly_dark")
     st.plotly_chart(fig, use_container_width=True)
 
-if __name__ == "__main__":
-    run_app()
+with col2:
+    st.subheader("🥇 현재 순위 및 색깔")
+    for i, agent in enumerate(top_agents[:5]):
+        st.metric(label=f"{i+1}위: {agent['id']}", 
+                  value=f"{agent['final_return']:.4f}", 
+                  delta=agent['current_color'],
+                  delta_color="normal" if agent['color_code'] != 'gray' else "off")
+        st.write("---")
+
+# 4. 하위권 쓰레기 처리 및 분석
+st.sidebar.header("🔍 지휘자 대시보드")
+st.sidebar.write(f"현재 시간: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+st.sidebar.info(f"총 참여 선수: 150명")
+st.sidebar.warning(f"수익률 마이너스 선수: {len([a for a in top_agents if a['final_return'] < 1.0])}명 (쓰레기 처리 중)")
+
+if st.sidebar.button("데이터 새로고침"):
+    st.rerun()
