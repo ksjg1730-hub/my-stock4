@@ -30,7 +30,7 @@ def get_performance_data():
             else:
                 close = df['Close']
 
-            # 비거래 시간 0값 보정 (LOCF)
+            # 비거래 시간 0값 보정 및 LOCF(Last Observation Carried Forward)
             close = close.replace(0, np.nan).ffill()
             
             if close.index.tz is None:
@@ -48,6 +48,7 @@ def get_performance_data():
             
             if sym == 'DX-Y.NYB': ret *= 5
             
+            # 수익률 값도 결측치를 채워 뚝 떨어짐 방지
             ret = ret.ffill()
             current_stats[sym] = {'price': close.iloc[-1], 'ret': ret.iloc[-1]}
             ret.name = sym
@@ -57,15 +58,15 @@ def get_performance_data():
     if not combined_df: return None, {}
     final_df = pd.concat(combined_df, axis=1).ffill()
     
-    # --- [트리플 에너지 이평선 로직] ---
+    # --- [에너지 이평선 계산 로직] ---
     vol_targets = list(tickers_info.keys())
     available_targets = [t for t in vol_targets if t in final_df.columns]
     
-    # 기초 에너지 (절대값 합산 * 0.5)
+    # 합산 에너지 추출 및 결측치 보정
     raw_energy = final_df[available_targets].abs().sum(axis=1, min_count=1) * 0.5
     raw_energy = raw_energy.ffill()
     
-    # 이평선 계산 (10, 30, 60)
+    # 트리플 이동평균 생성
     final_df['MA10'] = raw_energy.rolling(window=10, min_periods=1).mean()
     final_df['MA30'] = raw_energy.rolling(window=30, min_periods=1).mean()
     final_df['MA60'] = raw_energy.rolling(window=60, min_periods=1).mean()
@@ -73,8 +74,8 @@ def get_performance_data():
     return final_df, current_stats
 
 def run_app():
-    st.title("📊 매크로 자산 & 트리플 에너지 이평 분석")
-    st.markdown("##### ⬛ 굵은점선: MA 60 (장기) | ⬛ 굵은실선: MA 30 (중기) | ⬛ 얇은실선: MA 10 (단기)")
+    st.title("📊 매크로 자산 & 트리플 에너지 이평 분석 (Final)")
+    st.markdown("##### ⬛ 점선: MA 60 | ⬛ 굵은 실선: MA 30 | ⬛ 얇은 실선: MA 10 | 🌙 에러 수정 완료")
 
     df, stats = get_performance_data()
     if df is None:
@@ -83,7 +84,7 @@ def run_app():
 
     fig = go.Figure()
     
-    # 1. 개별 자산 수익률
+    # 1. 개별 자산
     for sym, info in tickers_info.items():
         if sym in df.columns:
             fig.add_trace(go.Scatter(
@@ -93,24 +94,24 @@ def run_app():
                 connectgaps=True 
             ))
 
-    # 2. 트리플 이평선
+    # 2. 트리플 이평선 (에러 원인 수정됨)
     if 'MA10' in df.columns:
-        # MA 10 (단기)
+        # 단기 (MA 10)
         fig.add_trace(go.Scatter(
             x=df.index, y=df['MA10'], name="에너지 MA 10",
             line=dict(color='rgba(0,0,0,0.4)', width=1.2),
             connectgaps=True
         ))
-        # MA 30 (중기)
+        # 중기 (MA 30)
         fig.add_trace(go.Scatter(
             x=df.index, y=df['MA30'], name="에너지 MA 30",
             line=dict(color='black', width=3),
             connectgaps=True
         ))
-        # MA 60 (장기) - 새로 추가
+        # 장기 (MA 60) - dash 옵션 수정
         fig.add_trace(go.Scatter(
             x=df.index, y=df['MA60'], name="에너지 MA 60",
-            line=dict(color='black', width=4, dash='tightdot'),
+            line=dict(color='black', width=4, dash='dot'), # 'tightdot' -> 'dot'으로 수정
             connectgaps=True
         ))
 
@@ -128,7 +129,7 @@ def run_app():
 
     st.plotly_chart(fig, use_container_width=True)
     
-    # 하단 지표 정보
+    # 하단 메트릭
     cols = st.columns(len(tickers_info) + 3)
     for i, sym in enumerate(tickers_info.keys()):
         if sym in stats:
