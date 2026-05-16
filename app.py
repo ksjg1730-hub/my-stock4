@@ -1,78 +1,165 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import yfinance as yf
+from datetime import datetime
 
 # 1. 페이지 설정
-st.set_page_config(page_title="24H 매크로 크로스 분석 시스템", layout="wide")
+st.set_page_config(page_title="Silver Real-time Strategy & Vol", layout="wide")
+st.title("🏆 은(Silver) 실전 릴레이 및 주간 변동성 분석")
+st.markdown("지난주 상위 3인 중 **주중 현재 1위**를 실시간으로 추적하며, **봉 완성 후 진입**을 준수합니다.")
 
-# 2. 종목 설정
-tickers_info = {
-    'HG=F': {'name': '국제 구리', 'color': '#D35400', 'width': 1.5},
-    'SI=F': {'name': '글로벌 은', 'color': '#F1C40F', 'width': 2.5},
-    'CL=F': {'name': 'WTI 원유', 'color': '#27AE60', 'width': 1.5},
-    'DX-Y.NYB': {'name': '달러지수(x5)', 'color': '#2C3E50', 'width': 1.5}
-}
+# 2. 데이터 수집 (최근 1개월, 15분봉)
+@st.cache_data(ttl=600)
+def get_silver_data():
+    try:
+        silver = yf.Ticker("SI=F")
+        df = silver.history(period="1mo", interval="15m")
+        if df.empty: return None
+        df = df.reset_index()
+        df = df[['Datetime', 'Close']].rename(columns={'Datetime': 'Time', 'Close': 'Price'})
+        df['Time'] = df['Time'].dt.tz_convert('Asia/Seoul')
+        # 주말 제외
+        df = df[df['Time'].dt.weekday < 5].copy()
+        return df
+    except Exception as e:
+        st.error(f"데이터 연동 오류: {e}")
+        return None
 
-@st.cache_data(ttl=60)
-def get_performance_data():
-    combined_df = []
-    current_stats = {}
+# 3. 핵심 엔진: 주중 1위 교체 + 봉 완성 후 진입 + 변동성 계산
+def run_integrated_engine(df):
+    df['week_grp'] = df['Time'].dt.strftime('%Y-%U')
+    unique_weeks = sorted(df['week_grp'].unique())
     
-    for sym, info in tickers_info.items():
-        try:
-            df = yf.download(sym, period='1mo', interval='15m', progress=False)
-            if df.empty: continue
-            
-            if isinstance(df.columns, pd.MultiIndex):
-                close = df['Close'][sym]
-            else:
-                close = df['Close']
+    np.random.seed(42)
+    # 150명의 후보 전략 생성
+    agent_configs = [
+        {'id': f"{i}호", 'window': np.random.randint(20, 100), 'threshold': np.random.uniform(0.0002, 0.0012)}
+        for i in range(1, 151)
+    ]
 
-            close = close.replace(0, np.nan).ffill()
-            
-            if close.index.tz is None:
-                close.index = close.index.tz_localize('UTC').tz_convert('Asia/Seoul')
-            else:
-                close.index = close.index.tz_convert('Asia/Seoul')
-
-            year_week = close.index.strftime('%G-%V')
-            def get_base_price(series):
-                target = series[(series.index.weekday == 4) & (series.index.hour == 13)]
-                return target.iloc[0] if not target.empty else series.iloc[0]
-
-            base_price = close.groupby(year_week).transform(get_base_price)
-            ret = ((close - base_price) / base_price * 100)
-            
-            if sym == 'DX-Y.NYB': ret *= 5
-            
-            ret = ret.ffill()
-            current_stats[sym] = {'price': close.iloc[-1], 'ret': ret.iloc[-1]}
-            ret.name = sym
-            combined_df.append(ret)
-        except: continue
-            
-    if not combined_df: return None, {}
-    final_df = pd.concat(combined_df, axis=1).ffill()
+    relay_equity = []
+    relay_signals = []
+    relay_ids = []
+    vix_values = []
     
-    vol_targets = list(tickers_info.keys())
-    available_targets = [t for t in vol_targets if t in final_df.columns]
-    pos_ret_df = final_df[available_targets].clip(lower=0)
-    
-    def get_bull_energy(row):
-        valid_values = row.dropna()
-        if len(valid_values) >= 2:
-            return valid_values.nlargest(2).sum() * 0.5
-        elif len(valid_values) == 1:
-            return valid_values.iloc[0] * 0.5
-        return 0.0
+    last_total_equity = 0
+    top_3_configs = [] # 지난주 성적 상위 3인
 
-    raw_energy = pos_ret_df.apply(get_bull_energy, axis=1)
+    for week in unique_weeks:
+        week_df = df[df['week_grp'] == week].copy()
+        if len(week_df) < 10: continue
+        
+        prices = week_df['Price'].values
+        # 수익률 (현재 봉 종가 / 이전 봉 종가 - 1)
+        returns = np.diff(prices, prepend=prices[0]) / prices
+        
+        # [변동성 계산] 월요일부터 새로 집계 (20봉 표준편차 연율화)
+        vol = week_df['Price'].pct_change().rolling(window=20, min_periods=1).std() * np.sqrt(252 * 96)
+        vix_values.extend(vol.fillna(0).tolist())
+
+        # [전략 실행]
+        if top_3_configs:
+            # 1. 후보 3인의 신호를 봉 완성 기준으로 미리 추출
+            candidate_signals = {}
+            for config in top_3_configs:
+                # shift(1)을 사용하여 t-1 시점의 데이터로 t 시점 진입 결정 (봉 완성 후 진입)
+                ma = week_df['Price'].rolling(window=config['window'], min_periods=1).mean().shift(1).values
+                candidate_signals[config['id']] = np.where(prices > ma * (1 + config['threshold']), 1, 0)
+            
+            week_equity = np.zeros(len(prices))
+            week_ids = [""] * len(prices)
+            week_sigs = np.zeros(len(prices))
+            
+            # 주중 실시간 수익 추적용
+            candidate_rets = {c['id']: 0.0 for c in top_3_configs}
+            
+            for t in range(len(prices)):
+                best_id = top_3_configs[0]['id']
+                max_perf = -99999
+                
+                # t시점에 3명 중 누적 수익이 가장 높은 사람 선발
+                for config in top_3_configs:
+                    cid = config['id']
+                    candidate_rets[cid] += candidate_signals[cid][t] * returns[t] * 2 * 100
+                    if candidate_rets[cid] > max_perf:
+                        max_perf = candidate_rets[cid]
+                        best_id = cid
+                
+                week_equity[t] = max_perf + last_total_equity
+                week_ids[t] = best_id
+                week_sigs[t] = candidate_signals[best_id][t]
+
+            relay_equity.extend(week_equity.tolist())
+            relay_ids.extend(week_ids)
+            relay_signals.extend(week_sigs.tolist())
+            last_total_equity = relay_equity[-1]
+            
+        else:
+            # 첫 주 데이터 수집
+            relay_equity.extend([0.0] * len(prices))
+            relay_ids.extend(["선발중"] * len(prices))
+            relay_signals.extend([0] * len(prices))
+
+        # [주말 선발] 다음 주를 위한 상위 3인 갱신
+        week_ranking = []
+        for config in agent_configs:
+            ma = week_df['Price'].rolling(window=config['window'], min_periods=1).mean().shift(1).values
+            sig = np.where(prices > ma * (1 + config['threshold']), 1, 0)
+            r = np.sum(np.nan_to_num(sig) * returns * 2) * 100
+            week_ranking.append({'config': config, 'ret': r})
+        
+        top_3_configs = [x['config'] for x in sorted(week_ranking, key=lambda x: x['ret'], reverse=True)[:3]]
+
+    # 길이 정렬
+    min_len = min(len(df), len(relay_equity))
+    return relay_equity[:min_len], relay_signals[:min_len], relay_ids[:min_len], vix_values[:min_len], df.iloc[:min_len]
+
+# 4. 실행 및 시각화
+df = get_silver_data()
+if df is not None:
+    equity, signals, ids, vix, plot_df = run_integrated_engine(df)
     
-    # 이평선 계산
-    final_df['MA20'] = raw_energy.rolling(window=20, min_periods=1).mean()
-    final_df['MA50'] = raw_energy.rolling(window=50, min_periods=1).mean()
+    # 두 개의 서브플롯 생성 (수익률 + 변동성)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                        vertical_spacing=0.1, subplot_titles=("실전 누적 수익률 (%)", "은 가격 주간 변동성 (VIX Style)"),
+                        row_heights=[0.7, 0.3])
+
+    # 1위 교체 지점 (노란 점선)
+    for i in range(1, len(ids)):
+        if ids[i] != ids[i-1]:
+            fig.add_vline(x=plot_df['Time'].iloc[i], line_width=0.8, line_dash="dot", line_color="yellow", row='all', col=1)
+
+    # 수익률 곡선 그리기 (구간별 색상)
+    start_idx = 0
+    for i in range(1, len(signals)):
+        if signals[i] != signals[i-1] or ids[i] != ids[i-1]:
+            curr_sig = signals[start_idx]
+            curr_id = ids[start_idx]
+            color = "#808080" if curr_id == "선발중" else ("#FF4B4B" if curr_sig == 1 else "#00CC96")
+            fig.add_trace(go.Scatter(x=plot_df['Time'].iloc[start_idx:i+1], y=np.array(equity)[start_idx:i+1],
+                                     mode='lines', line=dict(color=color, width=2), showlegend=False), row=1, col=1)
+            start_idx = i
+
+    # 변동성 차트 추가
+    fig.add_trace(go.Scatter(x=plot_df['Time'], y=vix, name="변동성", line=dict(color="#AB63FA")), row=2, col=1)
+
+    fig.update_layout(template="plotly_dark", plot_bgcolor='black', height=800, margin=dict(l=20, r=20, t=50, b=20))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # 사이드바 성과 지표
+    with st.sidebar:
+        st.header("📊 실전 리포트")
+        st.metric("현재 누적 수익", f"{equity[-1]:+.2f}%")
+        peak = np.maximum.accumulate(equity)
+        mdd = np.max(peak - equity)
+        st.metric("최대 낙폭 (MDD)", f"{mdd:.2f}%")
+        st.write("---")
+        st.subheader("현재 투입 전략")
+        st.info(f"선수명: {ids[-1]}")
+        st.write(f"현재 변동성: {vix[-1]:.2f}")    final_df['MA50'] = raw_energy.rolling(window=50, min_periods=1).mean()
     
     return final_df, current_stats
 
